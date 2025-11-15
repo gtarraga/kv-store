@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	v1 "kv-store/v1"
+	v2 "kv-store/v2"
 )
 
 type KVStore interface {
@@ -18,12 +19,13 @@ type KVStore interface {
 	Close() error
 }
 
-// Aailable database versions
+// Available database versions
 var dbRegistry = map[string]func() (KVStore, error){
 	"v1": func() (KVStore, error) { return v1.NewV1Store(), nil },
+	"v2": func() (KVStore, error) { return v2.NewV2Store(), nil },
 }
 
-const defaultVersion = "v1"
+const defaultVersion = "v2"
 
 func main() {
 	version := flag.String("version", defaultVersion, "Database version to use (v1, v2, v3, etc.)")
