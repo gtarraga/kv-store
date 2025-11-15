@@ -23,6 +23,8 @@ Build and run:
 go build -o kvdb
 ```
 
+### Single Version Mode
+
 Interactive mode:
 
 ```bash
@@ -37,6 +39,27 @@ Or run single commands:
 ./kvdb --version v1 update name john
 ./kvdb --version v1 delete name
 ```
+
+### Performance Comparison Mode
+
+Compare all versions side-by-side with the `--compare` flag:
+
+Interactive comparison mode:
+
+```bash
+./kvdb --compare
+```
+
+Or run single command comparisons:
+
+```bash
+./kvdb --compare add name will
+./kvdb --compare search name
+./kvdb --compare update name john
+./kvdb --compare delete name
+```
+
+This mode runs the same command on all available versions and displays the execution time (in milliseconds) for each version, making it easy to see performance differences between implementations.
 
 Commands: `add`, `search`, `update`, `delete`
 

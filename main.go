@@ -29,10 +29,26 @@ const defaultVersion = "v2"
 
 func main() {
 	version := flag.String("version", defaultVersion, "Database version to use (v1, v2, v3, etc.)")
+	compare := flag.Bool("compare", false, "Run in comparison mode to benchmark all versions")
 	flag.Parse()
 
 	args := flag.Args()
 
+	// Comparison mode
+	if *compare {
+		if len(args) == 0 {
+			runCompareInteractive()
+			return
+		}
+		
+		if err := runCompareCommand(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Standard single-version mode
 	db, err := initDB(*version)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
