@@ -10,7 +10,7 @@ Got inspired while reading [Designing Data-Intensive Applications](https://datai
 
 Each version (`v1`, `v2`, etc.) is a completely independent implementation with its own tradeoffs:
 
-- **v1**: Basic disk-only storage. Every operation hits the file. Slow but simple.
+- **[Version 1](https://github.com/gtarraga/kv-store/tree/main/v1)**: Basic disk-only storage. Every operation hits the file. Slow but simple.
 
 Each version lives in its own folder with its own README explaining the approach.
 
@@ -42,7 +42,7 @@ Commands: `add`, `search`, `update`, `delete`
 ## Project structure
 
 ```
-kv-database/
+kv-store/
 ├── main.go              # TUI interface (version selector + REPL)
 └── <db-version>/        # DB version directory
     ├── <db-version>.go  # DB version runnable
