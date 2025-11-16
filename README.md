@@ -14,7 +14,9 @@ Each version (`v1`, `v2`, etc.) is a completely independent implementation with 
 
 - `v2` - **[Append only](https://github.com/gtarraga/kv-store/tree/main/v2)**: Storage files are on-disk and immutable, we only append new lines to the file. Updates create a new KV at EOF with the updated value. Deletes also create a new line but we are using tombstone records. Search now looks for the last matching key in the file.
 
-- `v3` - **[Segmenting and compacting](https://github.com/gtarraga/kv-store/tree/main/v3)**: When db files get too big, we close them and create a new segment. Compaction removes duplicate keys and tombstones for old segments, keeping the size smaller. Search now goes over each segment, from most recent to oldest.
+- `v3` - **[It's indexed now](https://github.com/gtarraga/kv-store/tree/main/v3)**: This adds an in-memory hashmap index to keep the location of each of the values. Allows us to read at O(1) instead of O(n).
+
+- `v4` - **[Segmenting and compacting](https://github.com/gtarraga/kv-store/tree/main/v4)**: When db files get too big, we close them and create a new segment. Compaction removes duplicate keys and tombstones for old segments, keeping the size smaller.
 
 Each version lives in its own folder with its own README explaining the approach.
 

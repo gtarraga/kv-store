@@ -1,4 +1,4 @@
-package v3
+package v4
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 
 const tombstoneValue = "null"
 
-type V3Store struct {
+type V4Store struct {
 	mu             sync.RWMutex
 	dataDir        string
 	segments       []*Segment
@@ -18,8 +18,8 @@ type V3Store struct {
 	manager        *SegmentManager
 }
 
-func NewV3Store() *V3Store {
-	dataDir := filepath.Join("v3", "data")
+func NewV4Store() *V4Store {
+	dataDir := filepath.Join("v4", "data")
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
     panic(fmt.Sprintf("failed to create data directory: %v", err))
 	}
@@ -44,7 +44,7 @@ func NewV3Store() *V3Store {
 	// Active segment should always be the newest one
 	activeSegment := segments[len(segments)-1]
 	
-	store := &V3Store{
+	store := &V4Store{
 		dataDir:						dataDir,
 		segments:						segments,
 		activeSegment:			activeSegment,
@@ -55,14 +55,14 @@ func NewV3Store() *V3Store {
 	return store
 }
 
-func (s *V3Store) Close() error {
+func (s *V4Store) Close() error {
 	s.manager.Close()
 	return nil
 }
 
 // Sets a key-value pair in the database by appending to the file
 // If the active segment is over the max size, rotate the segment and append on the new one
-func (s *V3Store) Set(key string, value string) error {
+func (s *V4Store) Set(key string, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -94,7 +94,7 @@ func (s *V3Store) Set(key string, value string) error {
 
 // Reads segments from newest to oldest to find a key
 // It still has to read the entire file but segmenting keeps them small
-func (s *V3Store) Get(key string) (string, error) {
+func (s *V4Store) Get(key string) (string, error) {
 	s.mu.RLock()
 	segments := make([]*Segment, len(s.segments)) // Copying the array to release the lock asap
 	copy(segments, s.segments)
@@ -122,11 +122,11 @@ func (s *V3Store) Get(key string) (string, error) {
 }
 
 // Updates a key-value pair in the database by appending an updated value to the file
-func (s *V3Store) Update(key, value string) error {
+func (s *V4Store) Update(key, value string) error {
 	return s.Set(key, value)
 }
 
 // Deletes a key-value pair in the database by appending a tombstone record (`null` value) to the file
-func (s *V3Store) Delete(key string) error {
+func (s *V4Store) Delete(key string) error {
 	return s.Set(key, tombstoneValue)
 }
