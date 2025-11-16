@@ -11,7 +11,10 @@ Got inspired while reading [Designing Data-Intensive Applications](https://datai
 Each version (`v1`, `v2`, etc.) is a completely independent implementation with its own tradeoffs:
 
 - `v1` - **[The Basic One](https://github.com/gtarraga/kv-store/tree/main/v1)**: Basic disk-only storage. Every operation hits the file. Slow but simple.
+
 - `v2` - **[Append only](https://github.com/gtarraga/kv-store/tree/main/v2)**: Storage files are on-disk and immutable, we only append new lines to the file. Updates create a new KV at EOF with the updated value. Deletes also create a new line but we are using tombstone records. Search now looks for the last matching key in the file.
+
+- `v3` - **[Segmenting and compacting](https://github.com/gtarraga/kv-store/tree/main/v3)**: When db files get too big, we close them and create a new segment. Compaction removes duplicate keys and tombstones for old segments, keeping the size smaller. Search now goes over each segment, from most recent to oldest.
 
 Each version lives in its own folder with its own README explaining the approach.
 
