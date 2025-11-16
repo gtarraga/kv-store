@@ -10,17 +10,17 @@ import (
 const tombstoneValue = "null"
 
 type V3Store struct {
-	mu								sync.RWMutex
-	dataDir						string
-	segmentIds				[]int
-	activeSegmentId		int
-	activeSegmentPath	string
-	maxSegmentSize		int64
+	mu             sync.RWMutex
+	dataDir        string
+	segments       []*Segment
+	activeSegment  *Segment
+	maxSegmentSize int64
+	manager        *SegmentManager
 
 	// Compaction
-	compactCh					chan int
-	stopCompaction		chan struct{}
-	compactionDone		sync.WaitGroup
+	compactCh      chan int
+	stopCompaction chan struct{}
+	compactionDone sync.WaitGroup
 }
 
 func NewV3Store() *V3Store {
@@ -29,22 +29,26 @@ func NewV3Store() *V3Store {
     panic(fmt.Sprintf("failed to create data directory: %v", err))
 	}
 
-	segmentIds := getExistingSegments(dataDir)
+	manager := NewSegmentManager(dataDir)
+	segments, err := manager.DiscoverSegments()
+	if err != nil {
+		panic(fmt.Sprintf("failed to discover segments: %v", err))
+	}
 
-	// If theres no existing files we start the IDs at 1
-	if len(segmentIds) == 0 {
-		segmentIds = []int{1}
+	// If theres no existing segments we initialize them on 1
+	if len(segments) == 0 {
+		segments = []*Segment{NewSegment(dataDir, 1)}
 	}
 
 	// Active segment should always be the newest one
-	activeSegmentId := segmentIds[len(segmentIds)-1]
+	activeSegment := segments[len(segments)-1]
 	
 	store := &V3Store{
 		dataDir:						dataDir,
-		segmentIds:					segmentIds,
-		activeSegmentId:		activeSegmentId,
-		activeSegmentPath:	segmentPath(dataDir, activeSegmentId),
+		segments:						segments,
+		activeSegment:			activeSegment,
 		maxSegmentSize:			75, // Small max size ~8 lines
+		manager: 						manager,
 		compactCh:					make(chan int, 10), // Up to 10 segments can be queued for compaction
 		stopCompaction:			make(chan struct{}),
 	}
@@ -60,12 +64,10 @@ func NewV3Store() *V3Store {
 func (s *V3Store) Set(key string, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
-	// File size
-	info, err := os.Stat(s.activeSegmentPath)
-	currentSize := int64(0)
-	if err == nil {
-		currentSize = info.Size()
+
+	currentSize, err := s.activeSegment.Size()
+	if err != nil {
+		currentSize = 0
 	}
 	
 	// Write size of the new KV pair
@@ -73,39 +75,25 @@ func (s *V3Store) Set(key string, value string) error {
 
 	// If current size + new pair is bigger than max, rotate the segment
 	if currentSize + writeSize >= s.maxSegmentSize {
-		if err := rotateSegment(s); err != nil {
+		if err := s.rotateSegment(); err != nil {
 			return err
 		}
 	}
 
-	// Append on active segment as usual
-	file, err := os.OpenFile(s.activeSegmentPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	
-	if _, err = fmt.Fprintf(file, "%s:%s\n", key, value); err != nil {
-		return err
-	}
-	return file.Sync()
+	return s.activeSegment.Append(key, value)
 }
 
 // Reads segments from newest to oldest to find a key
 // It still has to read the entire file but segmenting keeps them small
 func (s *V3Store) Get(key string) (string, error) {
 	s.mu.RLock()
-	// Copying the array to release the lock asap
-	segmentIds := make([]int, len(s.segmentIds))
-	copy(segmentIds, s.segmentIds)
-	dataDir := s.dataDir
+	segments := make([]*Segment, len(s.segments)) // Copying the array to release the lock asap
+	copy(segments, s.segments)
 	s.mu.RUnlock()
 
-
-	// Iterating segments in reverse (newest first)
-	for i := len(segmentIds) - 1; i >= 0; i-- {
-		segmentPath := segmentPath(dataDir, segmentIds[i])
-		result, err := searchSegmentForKey(segmentPath, key)
+	// Search segments from newest to oldest
+	for i := len(segments) - 1; i >= 0; i-- {
+		result, err := segments[i].FindKey(key)
 		if err != nil {
 			return "", err
 		}
@@ -137,5 +125,34 @@ func (s *V3Store) Delete(key string) error {
 func (s *V3Store) Close() error {
 	close(s.stopCompaction)
 	s.compactionDone.Wait()
+	return nil
+}
+
+// Handles segment rotation when Set() calls it
+func (s *V3Store) rotateSegment() error {
+	oldSegment := s.activeSegment
+
+	// Create new segment with next id
+	newSegment, err := s.manager.CreateSegment(oldSegment.ID + 1)
+	if err != nil {
+		return fmt.Errorf("failed to create new segment: %w", err)
+	}
+
+	// Update state
+	s.activeSegment = newSegment
+	s.segments = append(s.segments, newSegment)
+	
+	// Make old segment readonly
+	if err := oldSegment.SetReadOnly(); err != nil {
+		fmt.Printf("Warning: failed to set segment %d readonly: %v\n", oldSegment.ID, err)
+	}
+
+	// Send old segment to the compaction background runner
+	select {
+	case s.compactCh <- oldSegment.ID:
+	default:
+		// Channel is full so we skip compaction
+	}
+	
 	return nil
 }
