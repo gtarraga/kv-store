@@ -7,8 +7,11 @@ import (
 	"sync"
 )
 
+const tombstoneValue = "null"
+
 type V3Store struct {
 	mu								sync.RWMutex
+	dataDir						string
 	segmentIds				[]int
 	activeSegmentId		int
 	activeSegmentPath	string
@@ -37,6 +40,7 @@ func NewV3Store() *V3Store {
 	activeSegmentId := segmentIds[len(segmentIds)-1]
 	
 	store := &V3Store{
+		dataDir:						dataDir,
 		segmentIds:					segmentIds,
 		activeSegmentId:		activeSegmentId,
 		activeSegmentPath:	segmentPath(dataDir, activeSegmentId),
@@ -94,27 +98,27 @@ func (s *V3Store) Get(key string) (string, error) {
 	// Copying the array to release the lock asap
 	segmentIds := make([]int, len(s.segmentIds))
 	copy(segmentIds, s.segmentIds)
-	dataDir := filepath.Dir(s.activeSegmentPath)
+	dataDir := s.dataDir
 	s.mu.RUnlock()
 
 
 	// Iterating segments in reverse (newest first)
 	for i := len(segmentIds) - 1; i >= 0; i-- {
 		segmentPath := segmentPath(dataDir, segmentIds[i])
-		value, found, deleted, err := searchSegmentForKey(segmentPath, key)
+		result, err := searchSegmentForKey(segmentPath, key)
 		if err != nil {
 			return "", err
 		}
 
-		if !found {
+		if !result.Found {
 			continue
 		}
 
-		if deleted {
+		if result.Deleted {
 			return "", fmt.Errorf("key not found: %s", key)
 		}
 
-		return value, nil
+		return result.Value, nil
 	}
 
 	return "", fmt.Errorf("key not found: %s", key)
@@ -127,7 +131,7 @@ func (s *V3Store) Update(key, value string) error {
 
 // Deletes a key-value pair in the database by appending a tombstone record (`null` value) to the file
 func (s *V3Store) Delete(key string) error {
-	return s.Set(key, "null")
+	return s.Set(key, tombstoneValue)
 }
 
 func (s *V3Store) Close() error {

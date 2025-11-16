@@ -80,15 +80,21 @@ func rotateSegment(s *V3Store) error {
 	return nil
 }
 
+type segmentSearchResult struct {
+	Value 	string
+	Found 	bool // true if key exists in this segment
+	Deleted	bool // true if found but is a tombstone
+}
+
 // Basic implementation of a get method on an append only file (like in v2)
 // It returns a found and deleted booleans so we can stop searching segments asap
-func searchSegmentForKey(segmentPath, key string) (string, bool, bool, error) {
+func searchSegmentForKey(segmentPath, key string) (segmentSearchResult, error) {
 	file, err := os.Open(segmentPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", false, false, nil
+			return segmentSearchResult{}, nil
 		}
-		return "", false, false, err
+		return segmentSearchResult{}, err
 	}
 	defer file.Close()
 
@@ -106,17 +112,17 @@ func searchSegmentForKey(segmentPath, key string) (string, bool, bool, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-    return "", false, false, err
+    return segmentSearchResult{}, err
 	}
 
   if !found {
-		return "", false, false, nil
+		return segmentSearchResult{}, nil // Not found in this segment
+	}
+	
+	if foundValue == tombstoneValue {
+		return segmentSearchResult{Found: true, Deleted: true}, nil // Found but is a tombstone
 	}
 
-	// If the value is "null" this means it was deleted ("null" is our tombstone record)
-	if foundValue == "null" {
-		return "", true, true, nil
-	}
 
-	return foundValue, true, false, nil
+	return segmentSearchResult{Value: foundValue, Found: true}, nil
 }

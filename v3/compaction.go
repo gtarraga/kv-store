@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -26,7 +25,7 @@ func (s *V3Store) compactionWorker() {
 // after that, it removes the deleted KVs (tombstone values) and writes a temp file
 // finally it replaces the original file with the newly compacted temp file
 func (s *V3Store) compactSegment(segmentId int) {
-	segmentPath := segmentPath(filepath.Dir(s.activeSegmentPath), segmentId)
+	segmentPath := segmentPath(s.dataDir, segmentId)
 
 	file, err := os.Open(segmentPath)
 	if err != nil {
@@ -61,7 +60,7 @@ func (s *V3Store) compactSegment(segmentId int) {
 	// This could be done more efficiently skipping the lines on the write
 	// but doing it separately to illustrate the tombstone handling
 	for key, value := range keyValues {
-		if value == "null" {
+		if value == tombstoneValue {
 			delete(keyValues, key)
 		}
 	}
