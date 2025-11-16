@@ -9,6 +9,7 @@ import (
 
 	v1 "kv-store/v1"
 	v2 "kv-store/v2"
+	v3 "kv-store/v3"
 	v4 "kv-store/v4"
 )
 
@@ -24,6 +25,7 @@ type KVStore interface {
 var dbRegistry = map[string]func() (KVStore, error){
 	"v1": func() (KVStore, error) { return v1.NewV1Store(), nil },
 	"v2": func() (KVStore, error) { return v2.NewV2Store(), nil },
+	"v3": func() (KVStore, error) { return v3.NewV3Store(), nil },
 	"v4": func() (KVStore, error) { return v4.NewV4Store(), nil },
 }
 
