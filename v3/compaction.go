@@ -4,16 +4,16 @@ import (
 	"fmt"
 )
 
-func (s *V3Store) compactionWorker() {
-	defer s.compactionDone.Done()
+func (sm *SegmentManager) compactionWorker() {
+	defer sm.compactionDone.Done()
 
 	for {
 		select {
-		case <-s.stopCompaction:
+		case <-sm.stopCompaction:
 			return
-		case segmentId := <-s.compactCh:
-			if err := s.compactSegment(segmentId); err != nil {
-				fmt.Printf("Compaction error for segment %d: %v\n", segmentId, err)
+		case req := <-sm.compactCh:
+			if err := sm.compactSegment(req.segmentID, req.tombstoneValue); err != nil {
+				fmt.Printf("Compaction error for segment %d: %v\n", req.segmentID, err)
 			}
 		}
 	}
@@ -22,8 +22,8 @@ func (s *V3Store) compactionWorker() {
 // This function loads the old segment records onto an in-memory hashmap to deduplicate
 // after that, it removes the deleted KVs (tombstone values) and writes a temp file
 // finally it replaces the original file with the newly compacted temp file
-func (s *V3Store) compactSegment(segmentId int) error {
-	seg := NewSegment(s.dataDir, segmentId)
+func (sm *SegmentManager) compactSegment(segmentId int, tombstoneValue string) error {
+	seg := NewSegment(sm.DataDir, segmentId)
 
 	// Read all records from the segment (already handles deduplication)
 	keyValues, err := seg.ReadAllRecords()

@@ -16,11 +16,6 @@ type V3Store struct {
 	activeSegment  *Segment
 	maxSegmentSize int64
 	manager        *SegmentManager
-
-	// Compaction
-	compactCh      chan int
-	stopCompaction chan struct{}
-	compactionDone sync.WaitGroup
 }
 
 func NewV3Store() *V3Store {
@@ -35,9 +30,15 @@ func NewV3Store() *V3Store {
 		panic(fmt.Sprintf("failed to discover segments: %v", err))
 	}
 
-	// If theres no existing segments we initialize them on 1
+	// If theres no existing segments we create an empty segment #1 on disk
 	if len(segments) == 0 {
-		segments = []*Segment{NewSegment(dataDir, 1)}
+		seg := NewSegment(dataDir, 1)
+		file, err := os.Create(seg.Path)
+		if err != nil {
+			panic(fmt.Sprintf("failed to create initial segment: %v", err))
+		}
+		file.Close()
+		segments = []*Segment{seg}
 	}
 
 	// Active segment should always be the newest one
@@ -49,14 +50,14 @@ func NewV3Store() *V3Store {
 		activeSegment:			activeSegment,
 		maxSegmentSize:			75, // Small max size ~8 lines
 		manager: 						manager,
-		compactCh:					make(chan int, 10), // Up to 10 segments can be queued for compaction
-		stopCompaction:			make(chan struct{}),
 	}
 
-	store.compactionDone.Add(1)
-	go store.compactionWorker()
-
 	return store
+}
+
+func (s *V3Store) Close() error {
+	s.manager.Close()
+	return nil
 }
 
 // Sets a key-value pair in the database by appending to the file
@@ -75,9 +76,17 @@ func (s *V3Store) Set(key string, value string) error {
 
 	// If current size + new pair is bigger than max, rotate the segment
 	if currentSize + writeSize >= s.maxSegmentSize {
-		if err := s.rotateSegment(); err != nil {
+		oldSegment := s.activeSegment
+
+		// Send it off to the manager for segment rotation and compaction
+		newSegment, err := s.manager.RotateSegment(oldSegment, tombstoneValue)
+		if err != nil {
 			return err
 		}
+
+		// Update state
+		s.activeSegment = newSegment
+		s.segments = append(s.segments, newSegment)
 	}
 
 	return s.activeSegment.Append(key, value)
@@ -120,39 +129,4 @@ func (s *V3Store) Update(key, value string) error {
 // Deletes a key-value pair in the database by appending a tombstone record (`null` value) to the file
 func (s *V3Store) Delete(key string) error {
 	return s.Set(key, tombstoneValue)
-}
-
-func (s *V3Store) Close() error {
-	close(s.stopCompaction)
-	s.compactionDone.Wait()
-	return nil
-}
-
-// Handles segment rotation when Set() calls it
-func (s *V3Store) rotateSegment() error {
-	oldSegment := s.activeSegment
-
-	// Create new segment with next id
-	newSegment, err := s.manager.CreateSegment(oldSegment.ID + 1)
-	if err != nil {
-		return fmt.Errorf("failed to create new segment: %w", err)
-	}
-
-	// Update state
-	s.activeSegment = newSegment
-	s.segments = append(s.segments, newSegment)
-	
-	// Make old segment readonly
-	if err := oldSegment.SetReadOnly(); err != nil {
-		fmt.Printf("Warning: failed to set segment %d readonly: %v\n", oldSegment.ID, err)
-	}
-
-	// Send old segment to the compaction background runner
-	select {
-	case s.compactCh <- oldSegment.ID:
-	default:
-		// Channel is full so we skip compaction
-	}
-	
-	return nil
 }
