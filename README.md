@@ -18,6 +18,8 @@ Each version (`v1`, `v2`, etc.) is a completely independent implementation with 
 
 - `v4` - **[Segmenting and compacting](https://github.com/gtarraga/kv-store/tree/main/v4)**: When db files get too big, we close them and create a new segment. Compaction removes duplicate keys and tombstones for old segments, keeping the size smaller.
 
+- `v4_idx` - **[Indexed Segments](https://github.com/gtarraga/kv-store/tree/main/v4_indexed)**: Added the global index to the segmented db. Searching now checks the index to find the KV's segment file and offset and reads that line directly.
+
 Each version lives in its own folder with its own README explaining the approach.
 
 ## Usage

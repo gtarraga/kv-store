@@ -57,10 +57,8 @@ func (seg *Segment) Append(key, value string) error {
 	}
 	defer file.Close()
 	
-	if _, err = fmt.Fprintf(file, "%s:%s\n", key, value); err != nil {
-		return err
-	}
-	return file.Sync()
+	_, err = fmt.Fprintf(file, "%s:%s\n", key, value)
+	return err
 }
 
 // Writes all records to the segment file, also used for compaction
