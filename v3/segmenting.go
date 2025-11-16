@@ -33,7 +33,7 @@ func getExistingSegments(dataDir string) []int {
 	// Reading the data dir for existing segments
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		panic(err)
+		return nil
 	}
 
 	// Building the available IDs from the existing files
@@ -63,10 +63,17 @@ func rotateSegment(s *V3Store) error {
 	s.activeSegmentPath = newSegmentPath
 	s.segmentIds = append(s.segmentIds, newSegmentId)
 	
-	// Make old segment readonly
-	if oldSegmentPath != "" {		
+	// Compact old segment and make it readonly
+	if oldSegmentPath != "" {
 		if err := os.Chmod(oldSegmentPath, 0o444); err != nil {
 			fmt.Printf("Warning: failed to set %s readonly: %v\n", oldSegmentPath, err)
+		}
+
+		// Send old file to the compaction background runner
+		select {
+		case s.compactCh <- newSegmentId - 1:
+		default:
+			// Channel is full so we skip compaction
 		}
 	}
 	
@@ -97,6 +104,9 @@ func searchSegmentForKey(segmentPath, key string) (string, bool, bool, error) {
 			foundValue = parts[1]
 			found = true
 		}
+	}
+	if err := scanner.Err(); err != nil {
+    return "", false, false, err
 	}
 
   if !found {
