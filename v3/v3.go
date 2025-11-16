@@ -55,11 +55,17 @@ func (s *V3Store) Set(key string, value string) error {
 	}
 	defer file.Close()
 
-	// Write and update index, also rewrites KV updates and deletes
+	// Write to file
 	if _, err = fmt.Fprintf(file, "%s:%s\n", key, value); err != nil {
 		return err
 	}
-	s.index[key] = byteOffset // Update index after successful write
+
+	// Update index after successful write. If tombstone, remove from index
+	if value == "null" {
+		delete(s.index, key)
+	} else {
+		s.index[key] = byteOffset 
+	}
 	return nil
 }
 
