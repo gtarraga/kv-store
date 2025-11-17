@@ -87,6 +87,9 @@ func (s *V4IdxStore) Set(key string, value string) error {
 	// Write size of the new KV pair
 	writeSize := int64(len(key) + len(value) + 2) // key:value\n
 
+	// Get the current offset, which is actually the size before write
+	offset := currentSize
+
 	// If current size + new pair is bigger than max, rotate the segment
 	if currentSize + writeSize >= s.maxSegmentSize {
 		oldSegment := s.activeSegment
@@ -102,12 +105,29 @@ func (s *V4IdxStore) Set(key string, value string) error {
 			return err
 		}
 
+		// Update offset after rotation
+		offset = 0
+
 		// Update state
 		s.activeSegment = newSegment
 		s.segments = append(s.segments, newSegment)
 	}
 
-	return s.activeSegment.Append(key, value)
+	// Write to file
+	if err = s.activeSegment.Append(key, value); err != nil {
+		return err
+	}
+
+	// Update index after successful write. If tombstone, remove from index
+	if value == "null" {
+		delete(s.index, key)
+	} else {
+		s.index[key] = SegmentLocation{
+			SegmentId: s.activeSegment.Id,
+			Offset: offset,
+		} 
+	}
+	return nil
 }
 
 func (s *V4IdxStore) Get(key string) (string, error) {
