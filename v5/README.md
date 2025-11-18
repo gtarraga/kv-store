@@ -1,4 +1,4 @@
-# Tiered Storage with Manifest
+# Tiered and merges and persistent indexes
 
 An append-only KV store introducing a Tier based Compacted Architecture. This version implements merging segments by organizing them into tiers, managed by the `SegmentManager` and tracked via a `MANIFEST` file.
 

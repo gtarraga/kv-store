@@ -20,6 +20,8 @@ Each version (`v1`, `v2`, etc.) is a completely independent implementation with 
 
 - `v4_idx` - **[Indexed Segments](https://github.com/gtarraga/kv-store/tree/main/v4_indexed)**: Added the global index to the segmented db. Searching now checks the index to find the KV's segment file and offset and reads that line directly.
 
+- `v5` - **[Tiering and merges](https://github.com/gtarraga/kv-store/tree/main/v5)**: Each segment has its own index and idx compantion file. Added a manifest file to keep track of the state of segments and tiers. Merges and tiers now compact data and help enhance search speeds since less files.
+
 Each version lives in its own folder with its own README explaining the approach.
 
 ## Usage
