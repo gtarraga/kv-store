@@ -22,11 +22,6 @@ func (sm *SegmentManager) mergerWorker() {
 
 // Handles merge for a tier and checks if we need to cascade into merging the next tier
 func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) error {
-	// Guarding against merging on our max level
-	if level >= sm.maxLevels {
-		return nil
-	}
-
 	newMergedSegment, err := sm.performMerge(level, segmentsToMerge)
 	if err != nil {
 		return fmt.Errorf("failed merge IO for tier %d: %w", level, err)
@@ -35,15 +30,18 @@ func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) e
 	// Locking to handle manifest (our single source of truth)
 	sm.mu.Lock()
 	
-	nextLevel := level + 1
-	
+	targetLevel := level + 1
+	if level == sm.maxLevels {
+		targetLevel = level // Merge files at bottom level to avoid it becoming a graveyard
+	}
+
 	// Make sure next tier exists
-	for len(sm.tiers) <= nextLevel {
-		sm.tiers = append(sm.tiers, Tier{Level: nextLevel, Segments: []*Segment{}})
+	for len(sm.tiers) <= targetLevel {
+		sm.tiers = append(sm.tiers, Tier{Level: targetLevel, Segments: []*Segment{}})
 	}
 	
 	// APPEND merged segment, the newest in the next tier
-	sm.tiers[nextLevel].Segments = append(sm.tiers[nextLevel].Segments, newMergedSegment)
+	sm.tiers[targetLevel].Segments = append(sm.tiers[targetLevel].Segments, newMergedSegment)
 
 	// Atomic commit of the new state to the manifest
 	manifest := sm.buildManifestFromState()
@@ -54,9 +52,9 @@ func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) e
 
 	// Check if this merge will fill next tier, we cascade into another merge if it does
 	var nextSegmentsToMerge []*Segment
-	if len(sm.tiers[nextLevel].Segments) >= sm.mergeThreshold {
-		nextSegmentsToMerge = sm.tiers[nextLevel].Segments
-		sm.tiers[nextLevel].Segments = []*Segment{} // Clean up tier for the cascading merge
+	if len(sm.tiers[targetLevel].Segments) >= sm.mergeThreshold {
+		nextSegmentsToMerge = sm.tiers[targetLevel].Segments
+		sm.tiers[targetLevel].Segments = []*Segment{} // Clean up tier for the cascading merge
 	}
 
 	sm.mu.Unlock() // Manifest is OK
@@ -68,8 +66,8 @@ func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) e
 	}
 
 	// If we cascaded, run another merge with the newer segments
-	if nextSegmentsToMerge != nil && level < sm.maxLevels {
-		return sm.runMergeCycle(nextLevel, nextSegmentsToMerge)
+	if nextSegmentsToMerge != nil && level <= sm.maxLevels {
+		return sm.runMergeCycle(targetLevel, nextSegmentsToMerge)
 	}
 
 	return nil
@@ -80,6 +78,8 @@ func (sm *SegmentManager) performMerge(level int, segments []*Segment) (*Segment
 	if len(segments) == 0 {
 		return nil, fmt.Errorf("cannot merge zero segments")
 	}
+
+	isMaxLevel := level == sm.maxLevels
 
 	// Starts from oldest seg and overwrites with the newer seg entries
 	// Deduplicates and merges the data
@@ -92,7 +92,14 @@ func (sm *SegmentManager) performMerge(level int, segments []*Segment) (*Segment
 			return nil, fmt.Errorf("could not read entries from segment %d: %w", seg.Id, err)
 		}
 		for _, entry := range entries {
-			mergedData[entry.Key] = entry.Value
+			isTombstone := entry.Value == TOMBSTONE_VALUE
+		
+			// Keep tombstones unless we are merging max level segments
+			if isMaxLevel && isTombstone {
+				delete(mergedData, entry.Key)
+			} else {
+				mergedData[entry.Key] = entry.Value
+			}
 		}
 	}
 
