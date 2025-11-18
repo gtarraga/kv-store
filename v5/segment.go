@@ -66,9 +66,9 @@ func (seg *Segment) Append(key, value string) error {
 		return err
 	}
 	defer file.Close()
-	
-	_, err = fmt.Fprintf(file, "%s:%s\n", key, value)
-	if err!= nil {
+
+	line := fmt.Sprintf("%s:%s\n", key, value)
+	if _, err = file.WriteString(line); err != nil {
 		return err
 	}
 
@@ -79,13 +79,14 @@ func (seg *Segment) Append(key, value string) error {
 	return nil
 }
 
-// Writes all records to the segment file, also used for compaction
+// WriteRecords writes a new segment file (used in compaction)
 func (seg *Segment) WriteRecords(records map[string]string) (map[string]int64, error) {
 	tempPath := seg.Path + ".tmp"
 	tempFile, err := os.Create(tempPath)
 	if err != nil {
 		return nil, fmt.Errorf("create temp file: %w", err)
 	}
+	defer os.Remove(tempPath) // Cleanup if we return early
 
 	newOffsets := make(map[string]int64)
 	var offset int64 = 0
@@ -97,7 +98,6 @@ func (seg *Segment) WriteRecords(records map[string]string) (map[string]int64, e
 
 		if _, err := tempFile.WriteString(line); err != nil {
 			tempFile.Close()
-			os.Remove(tempPath)
 			return nil, fmt.Errorf("write line: %w", err)
 		}
 
@@ -105,14 +105,11 @@ func (seg *Segment) WriteRecords(records map[string]string) (map[string]int64, e
 	}
 
 	if err := tempFile.Close(); err != nil {
-		os.Remove(tempPath)
     return nil, fmt.Errorf("close temp file: %w", err)
-    
 	}
 
 	// Replace old segment file with the new compacted one
 	if err := os.Rename(tempPath, seg.Path); err != nil {
-		os.Remove(tempPath)
 		return nil, fmt.Errorf("replace segment: %w", err)
 	}
 
@@ -175,9 +172,9 @@ func (seg *Segment) Read(offset int64) (string, error) {
 
 func (seg *Segment) LookupKey(key string) (string, bool) {
 	seg.mu.RLock()
-	defer seg.mu.RUnlock()
-	
 	offset, found := seg.Index[key]
+	seg.mu.RUnlock()
+
 	if !found {
 		return "", false
 	}
@@ -214,15 +211,8 @@ func (seg *Segment) SaveIndex() error {
 	defer file.Close()
 
 	seg.mu.RLock()
-	encoder := gob.NewEncoder(file)
-	err = encoder.Encode(seg.Index)
-	seg.mu.RUnlock()
-
-	if err != nil {
-		return fmt.Errorf("encode index: %w", err)
-	}
-
-	return nil
+	defer seg.mu.RUnlock()
+	return gob.NewEncoder(file).Encode(seg.Index)
 }
 
 // Loads index to memory from idx file or fallbacks to log file

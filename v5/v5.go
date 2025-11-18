@@ -12,16 +12,11 @@ const TOMBSTONE_VALUE = "null"
 const MAX_LEVEL = 2
 
 type V5Store struct {
-	mu							sync.RWMutex
-	dataDir					string
-
-	// Flattened slice of all segments from all tiers
-	// Ordered newest to oldest to read faster
-	readSegments		[]*Segment
-
-	activeSegment		*Segment
-	maxSegmentSize	int64
-	manager					*SegmentManager
+	mu             sync.RWMutex
+	dataDir        string
+	activeSegment  *Segment
+	maxSegmentSize int64
+	manager        *SegmentManager
 }
 
 func NewV5Store() *V5Store {
@@ -32,41 +27,34 @@ func NewV5Store() *V5Store {
 
 	manager := NewSegmentManager(dataDir)
 
-	store := &V5Store{
-		dataDir:						dataDir,
-		maxSegmentSize:			75, // Small max size ~8 lines
-		manager: 						manager,
-	}
-
-	manager.onMergeComplete = func(tiers []Tier, activeSegment *Segment) {
-		store.updateReadView(tiers, activeSegment)
-	}
-
-	tierSegments, activeSegment, err := manager.InitState()
+	activeSegment, err := manager.InitState()
 	if err != nil {
 		panic(fmt.Sprintf("failed to initialize db state: %v", err))
 	}
 
 	// If theres no existing segments we create an empty segment file and a manifest file
 	if activeSegment == nil {
-		activeSegment, err = manager.CreateSegment(1)
+		activeSegment, err = manager.CreateSegment()
 		if err != nil {
 			panic(fmt.Sprintf("failed to create initial segment: %v", err))
 		}
 		manager.WriteInitialManifest(activeSegment)
 	}
-	store.activeSegment = activeSegment
 
 	// Initialize all indexes for existing segments
-	allSegments := append(tierSegments, activeSegment)
-	for _, seg := range allSegments {
-		if err := seg.LoadIndex(); err != nil {
-			panic(fmt.Sprintf("failed to build index for segment %d: %v", seg.Id, err))
+	activeSegment.LoadIndex()
+	for _, tier := range manager.tiers {
+		for _, seg := range tier.Segments {
+			seg.LoadIndex()
 		}
 	}
 
-	store.updateReadView(manager.GetTiers(), activeSegment)
-	return store
+	return &V5Store{
+		dataDir:        dataDir,
+		maxSegmentSize:	75, // Small max size ~8 lines
+		manager:        manager,
+		activeSegment:  activeSegment,
+	}
 }
 
 func (s *V5Store) Close() error {
@@ -76,14 +64,11 @@ func (s *V5Store) Close() error {
 
 // Sets a key-value pair in the database by appending to the file
 // If the active segment is over the max size, rotate the segment and append on the new one
-func (s *V5Store) Set(key string, value string) error {
+func (s *V5Store) Set(key, value string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	currentSize, err := s.activeSegment.Size()
-	if err != nil {
-		currentSize = 0
-	}
+	currentSize, _ := s.activeSegment.Size()
 	
 	// Write size of the new KV pair
 	writeSize := int64(len(key) + len(value) + 2) // key:value\n, the +2 is for ":" and "\n"
@@ -92,7 +77,7 @@ func (s *V5Store) Set(key string, value string) error {
 	if currentSize + writeSize >= s.maxSegmentSize {
 		oldSegment := s.activeSegment
 
-		// Send it off to the manager for segment rotation and compaction
+		// Send it off to the manager for segment rotation
 		newSegment, err := s.manager.RotateSegment(oldSegment)
 		if err != nil {
 			return err
@@ -100,8 +85,6 @@ func (s *V5Store) Set(key string, value string) error {
 
 		// Update state
 		s.activeSegment = newSegment
-		// CANT WE JUST APPEND IT TO THE START INSTEAD OF REBUILDING THE WHOLE THING???
-		s.readSegments = append(s.readSegments, newSegment)
 	}
 
 	return s.activeSegment.Append(key, value)
@@ -109,18 +92,22 @@ func (s *V5Store) Set(key string, value string) error {
 
 func (s *V5Store) Get(key string) (string, error) {
 	s.mu.RLock()
-	segments := s.readSegments
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
 
-
-
-	for _, seg := range segments {
-		if value, found := seg.LookupKey(key); found {
-			if value == TOMBSTONE_VALUE {
-				return "", fmt.Errorf("key not found: %s", key)
-			}
-			return value, nil
+	// Check active segment first
+	if value, found := s.activeSegment.LookupKey(key); found {
+		if value == TOMBSTONE_VALUE {
+			return "", fmt.Errorf("key not found: %s", key)
 		}
+		return value, nil
+	}
+
+	// Check older segments through the segment manager
+	if value, found := s.manager.Get(key); found {
+		if value == TOMBSTONE_VALUE {
+			return "", fmt.Errorf("key not found: %s", key)
+		}
+		return value, nil
 	}
 
 	return "", fmt.Errorf("key not found: %s", key)
@@ -134,25 +121,6 @@ func (s *V5Store) Update(key, value string) error {
 // Deletes a key-value pair in the database by appending a tombstone record (`null` value) to the file
 func (s *V5Store) Delete(key string) error {
 	return s.Set(key, TOMBSTONE_VALUE)
-}
-
-// Creates a flattened slice from all the segments in
-// the db, ordered from newest to oldest to help out reads
-func (s *V5Store) updateReadView(tiers []Tier, activeSeg *Segment) {
-	newReadSegments := []*Segment{activeSeg}
-
-	// Order all segments from newest to oldest:
-	// Tier 0 -> Tier 1 -> Tier 2
-	// And from last in the tier array to first, since its newest last
-	for _, tier := range tiers {
-		for i := len(tier.Segments) - 1; i >= 0; i-- {
-			newReadSegments = append(newReadSegments, tier.Segments[i])
-		}
-	}
-
-	s.mu.Lock()
-	s.readSegments = newReadSegments
-	s.mu.Unlock()
 }
 
 // "key:value\n" parser

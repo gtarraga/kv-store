@@ -3,7 +3,6 @@ package v5
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 func (sm *SegmentManager) mergerWorker() {
@@ -24,7 +23,7 @@ func (sm *SegmentManager) mergerWorker() {
 // Handles merge for a tier and checks if we need to cascade into merging the next tier
 func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) error {
 	// Guarding against merging on our max level
-	if level >= MAX_LEVEL {
+	if level >= sm.maxLevels {
 		return nil
 	}
 
@@ -42,7 +41,9 @@ func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) e
 	for len(sm.tiers) <= nextLevel {
 		sm.tiers = append(sm.tiers, Tier{Level: nextLevel, Segments: []*Segment{}})
 	}
-	sm.tiers[nextLevel].Segments = append([]*Segment{newMergedSegment}, sm.tiers[nextLevel].Segments...)
+	
+	// APPEND merged segment, the newest in the next tier
+	sm.tiers[nextLevel].Segments = append(sm.tiers[nextLevel].Segments, newMergedSegment)
 
 	// Atomic commit of the new state to the manifest
 	manifest := sm.buildManifestFromState()
@@ -55,11 +56,9 @@ func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) e
 	var nextSegmentsToMerge []*Segment
 	if len(sm.tiers[nextLevel].Segments) >= sm.mergeThreshold {
 		nextSegmentsToMerge = sm.tiers[nextLevel].Segments
-		sm.tiers[nextLevel].Segments = []*Segment{}	// Clean up tier for the cascading merge
+		sm.tiers[nextLevel].Segments = []*Segment{} // Clean up tier for the cascading merge
 	}
 
-	currentTiers := sm.tiers
-	currentActiveSegment := sm.activeSegment
 	sm.mu.Unlock() // Manifest is OK
 
 	// Cleanup old fles
@@ -68,19 +67,13 @@ func (sm *SegmentManager) runMergeCycle(level int, segmentsToMerge []*Segment) e
 		os.Remove(seg.IndexPath())
 	}
 
-	// Notify the store to update the read slice with the new state
-	if sm.onMergeComplete != nil {
-		sm.onMergeComplete(currentTiers, currentActiveSegment)
-	}
-
 	// If we cascaded, run another merge with the newer segments
-	if nextSegmentsToMerge != nil && level < MAX_LEVEL {
+	if nextSegmentsToMerge != nil && level < sm.maxLevels {
 		return sm.runMergeCycle(nextLevel, nextSegmentsToMerge)
 	}
 
 	return nil
 }
-
 
 // Goes over each segment and writes a new merged and compacted segment
 func (sm *SegmentManager) performMerge(level int, segments []*Segment) (*Segment, error) {
@@ -88,12 +81,10 @@ func (sm *SegmentManager) performMerge(level int, segments []*Segment) (*Segment
 		return nil, fmt.Errorf("cannot merge zero segments")
 	}
 
-	isMaxLevel := level >= MAX_LEVEL-1
-
 	// Starts from oldest seg and overwrites with the newer seg entries
-	// Deduplicates and merges the data. We only remove tombstones if we create a level 2 segment.
-	// Tombstones act as a "shield" in upper tiers, they block us from going down
-	// a tier to search for a missing key. This wont be a problem in v6 when we add bloom filters
+	// Deduplicates and merges the data
+	// Tombstones act as a "shield" in upper tiers, they block us from going down a tier 
+	// to search for a missing key. This wont be a problem in v6 when we add bloom filters
 	mergedData := make(map[string]string)
 	for _, seg := range segments {
 		entries, err := seg.ReadAllEntries()
@@ -101,33 +92,16 @@ func (sm *SegmentManager) performMerge(level int, segments []*Segment) (*Segment
 			return nil, fmt.Errorf("could not read entries from segment %d: %w", seg.Id, err)
 		}
 		for _, entry := range entries {
-			isTombstone := entry.Value == TOMBSTONE_VALUE
-			
-			// Keep tombstones unless we are creating a max level segment
-			if isMaxLevel && isTombstone {
-				delete(mergedData, entry.Key)
-			} else {
-				mergedData[entry.Key] = entry.Value
-			}
+			mergedData[entry.Key] = entry.Value
 		}
 	}
 
-	// Run the creation twice, the first one might fail if the file already exists on disk
-	// This could be due to a crash so we delete it and rewrite it
-	newestSegmentId := segments[len(segments)-1].Id
-	newMergedSegment, err := sm.CreateSegment(newestSegmentId)
+	// New segment for the merged data
+	sm.mu.Lock()
+	newMergedSegment, err := sm.CreateSegment()
+	sm.mu.Unlock()
 	if err != nil {
-		if newMergedSegment != nil {
-			os.Remove(newMergedSegment.Path)
-		} else {
-			filename := fmt.Sprintf("segment_%04d.db", newestSegmentId)
-			os.Remove(filepath.Join(sm.dataDir, filename))
-		}
-		
-		newMergedSegment, err = sm.CreateSegment(newestSegmentId)
-		if err != nil {
-			return nil, fmt.Errorf("could not create new merged segment: %w", err)
-		}
+		return nil, fmt.Errorf("could not create new merged segment: %w", err)
 	}
 
 	// Write records and index

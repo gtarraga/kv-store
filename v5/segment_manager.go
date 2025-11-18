@@ -12,6 +12,7 @@ import (
 type Manifest struct {
 	Tiers					[]ManifestTier	`json:"tiers"`
 	ActiveSegment	string					`json:"active_segment"`
+	NextEntryID		int							`json:"next_entry_id"`
 }
 
 type ManifestTier struct {
@@ -33,15 +34,13 @@ type SegmentManager struct {
 	tiers					[]Tier 		// Contains all rotated segments
 	activeSegment	*Segment	// active segment is only here, not in tiers
 	maxLevels			int
+	nextEntryID		int
 
 	// Merging
 	mergeThreshold	int
 	mergeCh					chan []*Segment
 	stopMerger			chan struct{}
 	mergerDone			sync.WaitGroup
-
-	// Callback to Store to update the state after merge
-	onMergeComplete	func(tiers []Tier, activeSegment *Segment)
 }
 
 func NewSegmentManager(dataDir string) *SegmentManager {
@@ -64,33 +63,58 @@ func (sm *SegmentManager) Close() {
 	sm.mergerDone.Wait()
 }
 
+// Get searches for a key in all older segments
+// It returns (value, found)
+func (sm *SegmentManager) Get(key string) (string, bool) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	// Search tiers from newest to oldest
+	// Tier 0 (Newest) -> Tier N (Oldest)
+	for _, tier := range sm.tiers {
+		// Within a tier, search segments from newest to oldest
+		// Newest are at the end so we iterate in reverse:
+		// Newest (LAST) -> Oldest (FIRST)
+		for i := len(tier.Segments) - 1; i >= 0; i-- {
+			seg := tier.Segments[i]
+			val, found := seg.LookupKey(key)
+			if found {
+				return val, true
+			}
+		}
+	}
+	return "", false
+}
+
 // Loads the db structure from the MANIFEST file or initializes a new one
-func (sm *SegmentManager) InitState() ([]*Segment, *Segment, error) {
+func (sm *SegmentManager) InitState() (*Segment, error) {
 	manifestPath := filepath.Join(sm.dataDir, "MANIFEST")
 	f, err := os.Open(manifestPath)
 	if os.IsNotExist(err) {
 		return sm.initializeFromDirectory()
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to open manifest: %w", err)
+		return nil, fmt.Errorf("failed to open manifest: %w", err)
 	}
 	defer f.Close()
 
 	// It exists so we error out
 	var manifest Manifest
 	if err := json.NewDecoder(f).Decode(&manifest); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse manifest: %w", err)
+		return nil, fmt.Errorf("failed to parse manifest: %w", err)
 	}
 
-	allTierSegments := []*Segment{}
+	sm.nextEntryID = manifest.NextEntryID
+	
 	validFiles := make(map[string]bool)
+
+	// Load Tiers
 	for _, mt := range manifest.Tiers {
-		tierSegments := []*Segment{}
+		var tierSegments []*Segment
 		for _, segName := range mt.Segments {
 			id, _ := parseSegmentID(segName)
 			seg := NewSegment(sm.dataDir, id)
 			tierSegments = append(tierSegments, seg)
-			allTierSegments = append(allTierSegments, seg)
 			validFiles[segName] = true
 		}
 		
@@ -101,46 +125,41 @@ func (sm *SegmentManager) InitState() ([]*Segment, *Segment, error) {
 		})
 	}
 
-	var activeSegment *Segment
+	// Load Active
 	if manifest.ActiveSegment != "" {
 		id, _ := parseSegmentID(manifest.ActiveSegment)
-		activeSegment = NewSegment(sm.dataDir, id)
+		sm.activeSegment = NewSegment(sm.dataDir, id)
 		validFiles[manifest.ActiveSegment] = true
 	}
-	sm.activeSegment = activeSegment
 
-	if err := sm.cleanupDirectory(validFiles); err != nil {
-		fmt.Printf("failed to reconcile directory: %v\n", err)
-	}
-
-	return allTierSegments, activeSegment, nil
+	sm.cleanupDirectory(validFiles)
+	return sm.activeSegment, nil
 }
 
 // Only used when MANIFEST doesn't exist
-func (sm *SegmentManager) initializeFromDirectory() ([]*Segment, *Segment, error) {
+func (sm *SegmentManager) initializeFromDirectory() (*Segment, error) {
 	segments, err := sm.DiscoverSegments()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// New db!
 	if len(segments) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 
 	// Assign the last segment as active and add everything else to tierSegments
-	activeSegment := segments[len(segments)-1]
+	sm.activeSegment = segments[len(segments)-1]
 	tierSegments := segments[:len(segments)-1]
-	sm.activeSegment = activeSegment
-
 	sm.tiers = []Tier{{Level: 0, Segments: tierSegments}}
+	sm.nextEntryID = segments[len(segments)-1].Id + 1
 
 	// Fallback to writing manifest line by line
 	manifest := sm.buildManifestFromState()
 	if err := sm.writeManifest(manifest); err != nil {
-		return nil, nil, fmt.Errorf("failed to write initial manifest: %w", err)
-	}
-
-	return tierSegments, activeSegment, nil
+    return nil, fmt.Errorf("failed to write initial manifest: %w", err)
+  }
+	
+	return sm.activeSegment, nil
 }
 
 
@@ -168,31 +187,27 @@ func (sm *SegmentManager) DiscoverSegments() ([]*Segment, error) {
 }
 
 // Removes orphan files not in the manifest
-func (sm *SegmentManager) cleanupDirectory(validFiles map[string]bool) error {
-	entries, err := os.ReadDir(sm.dataDir)
-	if err != nil {
-		return err
-	}
+func (sm *SegmentManager) cleanupDirectory(validFiles map[string]bool) {
+	entries, _ := os.ReadDir(sm.dataDir)
 	for _, entry := range entries {
 		name := entry.Name()
-		if !validFiles[name] && (strings.HasSuffix(name, ".db") || strings.HasSuffix(name, ".idx") || strings.HasSuffix(name, ".tmp")) {
+		if !validFiles[name] && (strings.HasSuffix(name, ".db") || strings.HasSuffix(name, ".idx")) {
 			os.Remove(filepath.Join(sm.dataDir, name))
 		}
 	}
-	return nil
 }
 
 // Builds a manifest format from the one SegmentManager has in memory
 func (sm *SegmentManager) buildManifestFromState() Manifest {
 	manifest := Manifest{
-		ActiveSegment:	filepath.Base(sm.activeSegment.Path),
-		Tiers: 					[]ManifestTier{},
+		ActiveSegment: filepath.Base(sm.activeSegment.Path),
+		NextEntryID:	 sm.nextEntryID,
 	}
 
 	// TODO: This feels like the same we are doing in InitState but optimized,
 	// maybe we should look to optimize that or reuse this code
 	for _, tier := range sm.tiers {
-		mt := ManifestTier{Level: tier.Level, Segments: []string{}}
+		mt := ManifestTier{Level: tier.Level}
 		for _, seg := range tier.Segments {
 			mt.Segments = append(mt.Segments, filepath.Base(seg.Path))
 		}
@@ -239,7 +254,10 @@ func (sm *SegmentManager) GetTiers() []Tier {
 	return sm.tiers
 }
 
-func (sm *SegmentManager) CreateSegment(id int) (*Segment, error) {
+func (sm *SegmentManager) CreateSegment() (*Segment, error) {
+	id := sm.nextEntryID
+	sm.nextEntryID++
+	
 	seg := NewSegment(sm.dataDir, id)
 	if seg.Exists() {
 		return nil, fmt.Errorf("segment %d already exists", id)
@@ -250,7 +268,9 @@ func (sm *SegmentManager) CreateSegment(id int) (*Segment, error) {
 // Creates a new segment and sets the old one to readonly when Set() calls it
 func (sm *SegmentManager) RotateSegment(oldSegment *Segment) (*Segment, error) {
 	// Create new segment with next id
-	newSegment, err := sm.CreateSegment(oldSegment.Id + 1)
+	sm.mu.Lock()
+	newSegment, err := sm.CreateSegment()
+	sm.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new segment: %w", err)
 	}
@@ -259,17 +279,13 @@ func (sm *SegmentManager) RotateSegment(oldSegment *Segment) (*Segment, error) {
 	if err := oldSegment.SetReadOnly(); err != nil {
 		fmt.Printf("Warning: failed to set segment %d readonly: %v\n", oldSegment.Id, err)
 	}
+	oldSegment.SaveIndex()
 
-	// Save index to file
-	// We will be saving it again during compaction since the queue might 
-	// be full and we always want an index file for rotated segments
-	if err := oldSegment.SaveIndex(); err != nil {
-		fmt.Printf("failed to save index for segment  %d: %v", oldSegment.Id, err)
-	}
+	// We calculate what needs to be merged inside the lock, but we send to the
+	// channel outside the lock.
+	var segmentsToMerge []*Segment
 
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	// if there's no tiers yet, add the tier 0
 	if len(sm.tiers) == 0 {
 		sm.tiers = append(sm.tiers, Tier{Level: 0, Segments: []*Segment{}})
@@ -279,15 +295,22 @@ func (sm *SegmentManager) RotateSegment(oldSegment *Segment) (*Segment, error) {
 
 	// IF WE DO THIS WE COULD REUSE THE WriteInitialManifest FUNCTION??
 	sm.activeSegment = newSegment
-	manifest := sm.buildManifestFromState()
-	if err := sm.writeManifest(manifest); err != nil {
-		return nil, fmt.Errorf("FATAL: failed to write manifest after segment rotation: %w", err)
+
+	// Check if we have enough segments to merge and populate the details
+	if len(sm.tiers[0].Segments) >= sm.mergeThreshold {
+		segmentsToMerge = sm.tiers[0].Segments
+		sm.tiers[0].Segments = []*Segment{}
 	}
 
-	// Check if we have enough segments to merge and send it to the merger
-	if len(sm.tiers[0].Segments) >= sm.mergeThreshold {
-		segmentsToMerge := sm.tiers[0].Segments
-		sm.tiers[0].Segments = []*Segment{}
+	manifest := sm.buildManifestFromState()
+	if err := sm.writeManifest(manifest); err != nil {
+		sm.mu.Unlock()
+		return nil, fmt.Errorf("FATAL: failed to write manifest after segment rotation: %w", err)
+	}
+	sm.mu.Unlock()
+
+	// Send to merger now that we have unlocked
+	if len(segmentsToMerge) > 0 {
 		sm.mergeCh <- segmentsToMerge
 	}
 
@@ -296,9 +319,8 @@ func (sm *SegmentManager) RotateSegment(oldSegment *Segment) (*Segment, error) {
 
 func parseSegmentID(filename string) (int, bool) {
 	var id int
-	if n, err := fmt.Sscanf(filename, "segment_%d.db", &id); err == nil && n == 1 {
+	if _, err := fmt.Sscanf(filename, "segment_%d.db", &id); err == nil {
 		return id, true
 	}
-	// Add other formats like merged segments if needed
 	return 0, false
 }
