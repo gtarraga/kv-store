@@ -225,7 +225,7 @@ func (seg *Segment) SaveIndex() error {
 	return nil
 }
 
-// Loads index to memory from idx file
+// Loads index to memory from idx file or fallbacks to log file
 func (seg *Segment) LoadIndex() error {
 	indexPath := seg.IndexPath()
 

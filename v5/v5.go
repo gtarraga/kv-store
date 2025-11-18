@@ -8,15 +8,20 @@ import (
 	"sync"
 )
 
-const tombstoneValue = "null"
+const TOMBSTONE_VALUE = "null"
+const MAX_LEVEL = 2
 
 type V5Store struct {
-	mu             sync.RWMutex
-	dataDir        string
-	segments       []*Segment // oldest to newest
-	activeSegment  *Segment
-	maxSegmentSize int64
-	manager        *SegmentManager
+	mu							sync.RWMutex
+	dataDir					string
+
+	// Flattened slice of all segments from all tiers
+	// Ordered newest to oldest to read faster
+	readSegments		[]*Segment
+
+	activeSegment		*Segment
+	maxSegmentSize	int64
+	manager					*SegmentManager
 }
 
 func NewV5Store() *V5Store {
@@ -26,43 +31,41 @@ func NewV5Store() *V5Store {
 	}
 
 	manager := NewSegmentManager(dataDir)
-	segments, err := manager.DiscoverSegments()
-	if err != nil {
-		panic(fmt.Sprintf("failed to discover segments: %v", err))
+
+	store := &V5Store{
+		dataDir:						dataDir,
+		maxSegmentSize:			75, // Small max size ~8 lines
+		manager: 						manager,
 	}
 
-	// If theres no existing segments we create an empty segment #1 on disk
-	if len(segments) == 0 {
-		seg := NewSegment(dataDir, 1)
-		file, err := os.Create(seg.Path)
+	manager.onMergeComplete = func(tiers []Tier, activeSegment *Segment) {
+		store.updateReadView(tiers, activeSegment)
+	}
+
+	tierSegments, activeSegment, err := manager.InitState()
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialize db state: %v", err))
+	}
+
+	// If theres no existing segments we create an empty segment file and a manifest file
+	if activeSegment == nil {
+		activeSegment, err = manager.CreateSegment(1)
 		if err != nil {
 			panic(fmt.Sprintf("failed to create initial segment: %v", err))
 		}
-		file.Close()
-		segments = []*Segment{seg}
+		manager.WriteInitialManifest(activeSegment)
 	}
+	store.activeSegment = activeSegment
 
 	// Initialize all indexes for existing segments
-	for _, seg := range segments {
+	allSegments := append(tierSegments, activeSegment)
+	for _, seg := range allSegments {
 		if err := seg.LoadIndex(); err != nil {
 			panic(fmt.Sprintf("failed to build index for segment %d: %v", seg.Id, err))
 		}
 	}
 
-	// Active segment always rebuilds the index (maybe it crashed)
-	activeSegment := segments[len(segments)-1]
-	if err := activeSegment.RebuildIndex(); err != nil {
-		panic(fmt.Sprintf("failed to build index for active segment: %v", err))
-	}
-	
-	store := &V5Store{
-		dataDir:						dataDir,
-		segments:						segments,
-		activeSegment:			activeSegment,
-		maxSegmentSize:			75, // Small max size ~8 lines
-		manager: 						manager,
-	}
-
+	store.updateReadView(manager.GetTiers(), activeSegment)
 	return store
 }
 
@@ -83,21 +86,22 @@ func (s *V5Store) Set(key string, value string) error {
 	}
 	
 	// Write size of the new KV pair
-	writeSize := int64(len(key) + len(value) + 2) // key:value\n
+	writeSize := int64(len(key) + len(value) + 2) // key:value\n, the +2 is for ":" and "\n"
 
 	// If current size + new pair is bigger than max, rotate the segment
 	if currentSize + writeSize >= s.maxSegmentSize {
 		oldSegment := s.activeSegment
 
 		// Send it off to the manager for segment rotation and compaction
-		newSegment, err := s.manager.RotateSegment(oldSegment, tombstoneValue)
+		newSegment, err := s.manager.RotateSegment(oldSegment)
 		if err != nil {
 			return err
 		}
 
 		// Update state
 		s.activeSegment = newSegment
-		s.segments = append(s.segments, newSegment)
+		// CANT WE JUST APPEND IT TO THE START INSTEAD OF REBUILDING THE WHOLE THING???
+		s.readSegments = append(s.readSegments, newSegment)
 	}
 
 	return s.activeSegment.Append(key, value)
@@ -105,14 +109,14 @@ func (s *V5Store) Set(key string, value string) error {
 
 func (s *V5Store) Get(key string) (string, error) {
 	s.mu.RLock()
-	segments := s.segments
+	segments := s.readSegments
 	s.mu.RUnlock()
 
-	// Search segment indexes from newest to oldest
-	for i := len(segments) -1; i >= 0; i-- {
-		seg := segments[i]
+
+
+	for _, seg := range segments {
 		if value, found := seg.LookupKey(key); found {
-			if value == tombstoneValue {
+			if value == TOMBSTONE_VALUE {
 				return "", fmt.Errorf("key not found: %s", key)
 			}
 			return value, nil
@@ -129,7 +133,26 @@ func (s *V5Store) Update(key, value string) error {
 
 // Deletes a key-value pair in the database by appending a tombstone record (`null` value) to the file
 func (s *V5Store) Delete(key string) error {
-	return s.Set(key, tombstoneValue)
+	return s.Set(key, TOMBSTONE_VALUE)
+}
+
+// Creates a flattened slice from all the segments in
+// the db, ordered from newest to oldest to help out reads
+func (s *V5Store) updateReadView(tiers []Tier, activeSeg *Segment) {
+	newReadSegments := []*Segment{activeSeg}
+
+	// Order all segments from newest to oldest:
+	// Tier 0 -> Tier 1 -> Tier 2
+	// And from last in the tier array to first, since its newest last
+	for _, tier := range tiers {
+		for i := len(tier.Segments) - 1; i >= 0; i-- {
+			newReadSegments = append(newReadSegments, tier.Segments[i])
+		}
+	}
+
+	s.mu.Lock()
+	s.readSegments = newReadSegments
+	s.mu.Unlock()
 }
 
 // "key:value\n" parser
