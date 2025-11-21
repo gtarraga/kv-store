@@ -141,9 +141,13 @@ func (mt *MemTable) Flush(outputPath string) error {
 	if !mt.readOnly {
 		mt.MakeReadOnly()
 	}
+	count := mt.count
 	mt.mu.Unlock()
 
-	// TODO: SSTable writing
+	writer, err := NewSSTableWriter(outputPath, count)
+	if err != nil {
+		return fmt.Errorf("failed to create SSTable writer: %w", err)
+	}
 
 	iter := mt.skiplist.NewIterator()
 	entryCount := 0
@@ -151,8 +155,14 @@ func (mt *MemTable) Flush(outputPath string) error {
 		key := iter.Key()
 		value := iter.Value()
 
-		fmt.Printf("Key: %s, Value: %s\n", key, value)
+		if err := writer.Append(key, value); err != nil {
+			return fmt.Errorf("failed to write entry: %w", err)
+		}
 		entryCount++
+	}
+
+	if err := writer.Finalize(); err != nil {
+		return fmt.Errorf("failed to finalize SSTable: %w", err)
 	}
 
 	return nil
