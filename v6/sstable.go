@@ -1,13 +1,14 @@
 package v6
 
 import (
-	"encoding/binary"
+	"bufio"
 	"fmt"
 	"os"
 )
 
 type SSTableWriter struct {
 	file				*os.File
+	writer			*bufio.Writer
 	dataOffset	int64
 	index				[]IndexEntry
 	bloom				*BloomFilter
@@ -28,8 +29,11 @@ func NewSSTableWriter(path string, expectedKeys int) (*SSTableWriter, error) {
 	// 1% false positive rate
 	bloom := NewBloomFilter(expectedKeys, 0.01)
 
+	writer := bufio.NewWriter(file)
+
 	return &SSTableWriter{
 		file:       file,
+		writer:     writer,
 		dataOffset: 0,
 		index:      make([]IndexEntry, 0, expectedKeys/100), // Sparse index
 		bloom:      bloom,
@@ -41,22 +45,10 @@ func (w *SSTableWriter) Append(key, value []byte) error {
 	// Add the key to the bloom filter
 	w.bloom.Add(key)
 
-	keyLen := uint32(len(key))
-	valueLen := uint32(len(value))
-
-	// Write key and key length
-	if err := binary.Write(w.file, binary.BigEndian, keyLen); err != nil {
-		return err
-	}
-	if _, err := w.file.Write(key); err != nil {
-		return err
-	}
-
-	// Write value and key value
-	if err := binary.Write(w.file, binary.BigEndian, valueLen); err != nil {
-		return err
-	}
-	if _, err := w.file.Write(value); err != nil {
+	// Plain text: key:value\n
+	line := fmt.Sprintf("%s:%s\n", string(key), string(value))
+	n, err := w.writer.WriteString(line)
+	if err != nil {
 		return err
 	}
 
@@ -65,68 +57,58 @@ func (w *SSTableWriter) Append(key, value []byte) error {
 		w.index = append(w.index, IndexEntry{
 			Key:    append([]byte(nil), key...), // Copy key
 			Offset: w.dataOffset,
-			Size:   int64(8 + keyLen + valueLen),
+			Size:   int64(n),
 		})
 	}
 
-	w.dataOffset += int64(8 + keyLen + valueLen)
+	w.dataOffset += int64(n)
 	return nil
 }
 
+// SSTables have the index and bloom filters embedded in the same file, with a metadata footer to find those sections quickly
 func (w *SSTableWriter) Finalize() error {
 	dataEnd := w.dataOffset
 	
-	indexOffset := dataEnd
+	// Ondex section marker
+	if _, err := w.writer.WriteString("\n--- INDEX ---\n"); err != nil {
+		return err
+	}
+	indexOffset := dataEnd + 15 // +15 for "\n--- INDEX ---\n"
 	indexSize := 0
 
 	// Write index
 	for _, entry := range w.index {
-		// [keyLen:4][key][offset:8][size:8]
-		keyLen := uint32(len(entry.Key))
-		
-		if err := binary.Write(w.file, binary.BigEndian, keyLen); err != nil {
+		line := fmt.Sprintf("%s@%d:%d\n", string(entry.Key), entry.Offset, entry.Size)
+		n, err := w.writer.WriteString(line)
+		if err != nil {
 			return err
 		}
-		if _, err := w.file.Write(entry.Key); err != nil {
-			return err
-		}
-		if err := binary.Write(w.file, binary.BigEndian, entry.Offset); err != nil {
-			return err
-		}
-		if err := binary.Write(w.file, binary.BigEndian, entry.Size); err != nil {
-			return err
-		}
-		
-		indexSize += int(4 + keyLen + 16)
+		indexSize += n
 	}
 
-	// Write Bloom filter
-	bloomOffset := indexOffset + int64(indexSize)
-	bloomData := w.bloom.Marshal()
+	// Bloom filter section marker
+	if _, err := w.writer.WriteString("\n--- BLOOM ---\n"); err != nil {
+		return err
+	}
+	bloomOffset := indexOffset + int64(indexSize) + 15 // +15 for "\n--- BLOOM ---\n"
 	
-	bloomSize := uint32(len(bloomData))
-	if err := binary.Write(w.file, binary.BigEndian, bloomSize); err != nil {
+	// Bloom filter encoded
+	bloomData := w.bloom.Marshal()
+	if _, err := w.writer.Write(bloomData); err != nil {
 		return err
 	}
-	if _, err := w.file.Write(bloomData); err != nil {
-		return err
-	}
+	bloomSize := len(bloomData)
 
 	// Footer with metadata
-	// [indexOffset:8][indexSize:4][bloomOffset:8][bloomSize:4][magic:4]
-	footer := make([]byte, 28)
+	footer := fmt.Sprintf("\n--- FOOTER ---\nindex_offset:%d\nindex_size:%d\nbloom_offset:%d\nbloom_size:%d\nmagic:SST1\n",
+		indexOffset, indexSize, bloomOffset, bloomSize)
 	
-	binary.BigEndian.PutUint64(footer[0:8], uint64(indexOffset))
-	binary.BigEndian.PutUint32(footer[8:12], uint32(indexSize))
-	binary.BigEndian.PutUint64(footer[12:20], uint64(bloomOffset))
-	binary.BigEndian.PutUint32(footer[20:24], bloomSize)
-	
-	// Magic number to identify SSTable files
-	copy(footer[24:28], []byte("SST1"))
+	if _, err := w.writer.WriteString(footer); err != nil {
+		return err
+	}
 
-
-	// Write and sync to disk
-	if _, err := w.file.Write(footer); err != nil {
+	// Flush and sync to disk
+	if err := w.writer.Flush(); err != nil {
 		return err
 	}
 	if err := w.file.Sync(); err != nil {

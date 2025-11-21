@@ -2,11 +2,9 @@ package v6
 
 import (
 	"bufio"
-	"encoding/binary"
 	"fmt"
-	"hash/crc32"
-	"io"
 	"os"
+	"strings"
 )
 
 type WAL struct {
@@ -35,29 +33,18 @@ func NewWAL(path string) (*WAL, error) {
 }
 
 func (w *WAL) WriteEntry(entryType byte, key, value []byte) error {
-	keyLen := uint32(len(key))
-	valueLen := uint32(len(value))
-
-	// Build entry and reserve space for checksum
-	buf := make([]byte, 0, 13+keyLen+valueLen)
-	buf = append(buf, 0, 0, 0, 0)
-
-	// Type
-	buf = append(buf, entryType)
+	var line string
 	
-	// Key
-	buf = binary.BigEndian.AppendUint32(buf, keyLen)
-	buf = append(buf, key...)
+	switch entryType {
+	case WALEntryPut:
+		line = fmt.Sprintf("PUT %s:%s\n", string(key), string(value))
+	case WALEntryDelete:
+		line = fmt.Sprintf("DEL %s\n", string(key))
+	default:
+		return fmt.Errorf("unknown entry type: %d", entryType)
+	}
 
-	// Value
-	buf = binary.BigEndian.AppendUint32(buf, valueLen)
-	buf = append(buf, value...)
-
-	// Checksum
-	checksum := crc32.ChecksumIEEE(buf[4:])
-	binary.BigEndian.PutUint32(buf[0:4], checksum)
-
-	if _, err := w.writer.Write(buf); err != nil {
+	if _, err := w.writer.WriteString(line); err != nil {
 		return err
 	}
 	return w.writer.Flush()
@@ -97,73 +84,41 @@ func ReplayWAL(path string, mt *MemTable) error {
 	}
 	defer file.Close()
 	
-	reader := bufio.NewReader(file)
+	scanner := bufio.NewScanner(file)
 	
-	for {
-		// Read checksum
-		var checksumBuf [4]byte
-		if _, err := io.ReadFull(reader, checksumBuf[:]); err != nil {
-			if err == io.EOF {
-				break // Normal end of file
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		
+		if strings.HasPrefix(line, "PUT ") {
+			// Format: PUT key:value
+			parts := strings.SplitN(line[4:], ":", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid PUT entry: %s", line)
 			}
-			return err
+			key := []byte(parts[0])
+			value := []byte(parts[1])
+			mt.skiplist.Insert(key, value)
+			mt.size += int64(len(key) + len(value))
+			mt.count++
+		} else if strings.HasPrefix(line, "DEL ") {
+			// Format: DEL key
+			key := []byte(line[4:])
+			value, err := mt.skiplist.Find(key)
+			if err == nil {
+				mt.size -= int64(len(key) + len(value))
+				mt.count--
+				mt.skiplist.Delete(key)
+			}
+		} else {
+			return fmt.Errorf("unknown entry type in line: %s", line)
 		}
-		expectedChecksum := binary.BigEndian.Uint32(checksumBuf[:])
-		
-		// Read entry type
-		entryType, err := reader.ReadByte()
-		if err != nil {
-			return err
-		}
-		
-		// Read key length
-		var keyLenBuf [4]byte
-		if _, err := io.ReadFull(reader, keyLenBuf[:]); err != nil {
-			return err
-		}
-		keyLen := binary.BigEndian.Uint32(keyLenBuf[:])
-		
-		// Read key
-		key := make([]byte, keyLen)
-		if _, err := io.ReadFull(reader, key); err != nil {
-			return err
-		}
-		
-		// Read value length
-		var valueLenBuf [4]byte
-		if _, err := io.ReadFull(reader, valueLenBuf[:]); err != nil {
-			return err
-		}
-		valueLen := binary.BigEndian.Uint32(valueLenBuf[:])
-		
-		// Read value
-		value := make([]byte, valueLen)
-		if _, err := io.ReadFull(reader, value); err != nil {
-			return err
-		}
-		
-		// Verify checksum
-		checksumData := make([]byte, 0, 1+8+keyLen+valueLen)
-		checksumData = append(checksumData, entryType)
-		checksumData = append(checksumData, keyLenBuf[:]...)
-		checksumData = append(checksumData, key...)
-		checksumData = append(checksumData, valueLenBuf[:]...)
-		checksumData = append(checksumData, value...)
-		
-		actualChecksum := crc32.ChecksumIEEE(checksumData)
-		if actualChecksum != expectedChecksum {
-			return fmt.Errorf("checksum mismatch: expected %d, got %d", expectedChecksum, actualChecksum)
-		}
-		
-		// Replay entry
-		switch entryType {
-		case WALEntryPut:
-			mt.Insert(key, value)
-		case WALEntryDelete:
-			mt.Delete(key)
-		default:
-			return fmt.Errorf("unknown entry type: %d", entryType)
-		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 	
 	return nil
