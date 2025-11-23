@@ -351,12 +351,16 @@ func (r *SSTableReader) Get(key []byte) ([]byte, error) {
 		idx--
 	}
 
-	offset := r.index[idx].Offset
-	if _, err := r.file.Seek(offset, io.SeekStart); err != nil {
-		return nil, err
+	startOffset := r.index[idx].Offset
+	var endOffset int64
+	if idx+1 < len(r.index) {
+		endOffset = r.index[idx+1].Offset
+	} else {
+		endOffset = r.indexOffset
 	}
 
-	scanner := bufio.NewScanner(r.file)
+	sr := io.NewSectionReader(r.file, startOffset, endOffset - startOffset)
+	scanner := bufio.NewScanner(sr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		parts := strings.SplitN(line, ":", 2)
@@ -374,6 +378,45 @@ func (r *SSTableReader) Get(key []byte) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("key not found")
+}
+
+// Reads all KV pairs from the segment still reads the entire file line by line
+// this will be used when compacting segments after rotation
+func (r *SSTableReader) ReadAllRecords() (map[string][]byte, error) {
+	if _, err := r.file.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("failed to seek to start: %w", err)
+	}
+
+	entries := make(map[string][]byte)
+	scanner := bufio.NewScanner(r.file)
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Stop at index marker
+		if strings.HasPrefix(line, "\n--- INDEX ---") || strings.HasPrefix(line, "--- INDEX ---") {
+			break
+		}
+		
+		// Skip empty lines
+		if line == "" {
+			continue
+		}
+		
+		// Parse key:value
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		
+		entries[parts[0]] = []byte(parts[1])
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading entries: %w", err)
+	}
+	
+	return entries, nil
 }
 
 func (r *SSTableReader) Close() error {

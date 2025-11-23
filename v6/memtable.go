@@ -37,6 +37,17 @@ func NewMemTable(walPath string) (*MemTable, error) {
 	return mt, nil
 }
 
+// Used for compaction/recovery
+func NewMemTableWithoutWAL() *MemTable {
+	return &MemTable{
+		skiplist: NewSkipList(),
+		size:     0,
+		count:    0,
+		readOnly: false,
+		wal:      nil,
+	}
+}
+
 func (mt *MemTable) NewIterator() *Iterator {
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
@@ -110,6 +121,24 @@ func (mt *MemTable) Insert(key, value []byte) error {
 	return nil
 }
 
+// Used for compaction
+func (mt *MemTable) InsertWithoutWAL(key, value []byte) {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+
+	// Check if the key exists, to update or add the new KV size to the memtable size
+	existing, err := mt.skiplist.Find(key)
+	if err == nil {
+		mt.size -= int64(len(existing))
+		mt.size += int64(len(value))
+	} else {
+		mt.size += int64(len(key) + len(value))
+		mt.count++
+	}
+
+	mt.skiplist.Insert(key, value)
+}
+
 // Inserts or updates the KV and updates the size
 func (mt *MemTable) Delete(key []byte) bool {
 	mt.mu.Lock()
@@ -146,7 +175,7 @@ func (mt *MemTable) ShouldFlush(threshold int64) bool {
 func (mt *MemTable) Flush(outputPath string) error {
 	mt.mu.Lock()
 	if !mt.readOnly {
-		mt.MakeReadOnly()
+		mt.readOnly = true
 	}
 	count := mt.count
 	mt.mu.Unlock()
