@@ -13,6 +13,7 @@ import (
 	v4 "kv-store/v4"
 	v4_idx "kv-store/v4_indexed"
 	v5 "kv-store/v5"
+	v6 "kv-store/v6"
 )
 
 type KVStore interface {
@@ -31,9 +32,10 @@ var dbRegistry = map[string]func() (KVStore, error){
 	"v4": func() (KVStore, error) { return v4.NewV4Store(), nil },
 	"v4_idx": func() (KVStore, error) { return v4_idx.NewV4Store(), nil },
 	"v5": func() (KVStore, error) { return v5.NewV5Store(), nil },
+	"v6": func() (KVStore, error) { return v6.NewV6Store(), nil },
 }
 
-const defaultVersion = "v5"
+const defaultVersion = "v6"
 
 func main() {
 	version := flag.String("version", defaultVersion, "Database version to use (v1, v2, v3, etc.)")
