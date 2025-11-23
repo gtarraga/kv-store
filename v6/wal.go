@@ -100,9 +100,17 @@ func ReplayWAL(path string, mt *MemTable) error {
 			}
 			key := []byte(parts[0])
 			value := []byte(parts[1])
+			existing, err := mt.skiplist.Find(key)
+			if err == nil {
+					// Update existing
+					mt.size -= int64(len(existing))
+					mt.size += int64(len(value))
+			} else {
+					// New key
+					mt.size += int64(len(key) + len(value))
+					mt.count++
+			}
 			mt.skiplist.Insert(key, value)
-			mt.size += int64(len(key) + len(value))
-			mt.count++
 		} else if strings.HasPrefix(line, "DEL ") {
 			// Format: DEL key
 			key := []byte(line[4:])

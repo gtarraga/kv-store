@@ -16,8 +16,8 @@ type SSTableWriter struct {
 	dataOffset	int64
 	index				[]IndexEntry
 	bloom				*BloomFilter
-	minKey				[]byte
-	maxKey				[]byte
+	minKey			[]byte
+	maxKey			[]byte
 }
 
 type IndexEntry struct {
@@ -27,16 +27,17 @@ type IndexEntry struct {
 }
 
 type SSTableReader struct {
-	path         string
-	file         *os.File
-	indexOffset  int64
-	indexSize    int64
-	bloomOffset  int64
-	bloomSize    int64
-	index        []IndexEntry
-	bloom        *BloomFilter
-	minKey       []byte
-	maxKey       []byte
+	Path         	string
+	file         	*os.File
+	indexOffset  	int64
+	indexSize    	int64
+	bloomOffset  	int64
+	bloomSize    	int64
+	index        	[]IndexEntry
+	bloom        	*BloomFilter
+	minKey       	[]byte
+	maxKey       	[]byte
+	Id						int
 }
 
 type FooterMetadata struct {
@@ -204,7 +205,7 @@ func LoadSSTable(path string) (*SSTableReader, error) {
 	}
 
 	reader := &SSTableReader{
-		path: path,
+		Path: path,
 		file: file,
 		indexOffset: footer.IndexOffset,
 		indexSize: footer.IndexSize,
@@ -340,8 +341,13 @@ func (r *SSTableReader) Get(key []byte) ([]byte, error) {
 		return bytes.Compare(r.index[i].Key, key) >= 0
 	})
 
-	// Previous entry for sparse index
-	if idx > 0 {
+	// Sparse index navigation
+	if idx >= len(r.index) {
+		// Past the end, start from last entry
+		idx = len(r.index) - 1
+	}
+	if idx > 0 && bytes.Compare(r.index[idx].Key, key) > 0 {
+		// Key is between index entries, go back one
 		idx--
 	}
 

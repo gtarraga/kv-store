@@ -118,6 +118,13 @@ func (mt *MemTable) Delete(key []byte) bool {
 	if mt.readOnly {
 		panic("readonly memtable")
 	}
+	
+	// Write to WAL first (for durability)
+	if mt.wal != nil {
+		if err := mt.wal.WriteDelete(key); err != nil {
+			return false
+		}
+	}
 
 	// Check if the key exists, to update or add the new KV size to the memtable size
 	value, err := mt.skiplist.Find(key)
