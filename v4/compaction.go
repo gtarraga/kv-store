@@ -12,7 +12,7 @@ func (sm *SegmentManager) compactionWorker() {
 		case <-sm.stopCompaction:
 			return
 		case req := <-sm.compactCh:
-			if err := sm.compactSegment(req.segmentID, req.tombstoneValue); err != nil {
+			if err := sm.compactSegment(req.segmentID); err != nil {
 				fmt.Printf("Compaction error for segment %d: %v\n", req.segmentID, err)
 			}
 		}
@@ -22,22 +22,13 @@ func (sm *SegmentManager) compactionWorker() {
 // This function loads the old segment records onto an in-memory hashmap to deduplicate
 // after that, it removes the deleted KVs (tombstone values) and writes a temp file
 // finally it replaces the original file with the newly compacted temp file
-func (sm *SegmentManager) compactSegment(segmentId int, tombstoneValue string) error {
+func (sm *SegmentManager) compactSegment(segmentId int) error {
 	seg := NewSegment(sm.DataDir, segmentId)
 
 	// Read all records from the segment (already handles deduplication)
 	keyValues, err := seg.ReadAllRecords()
 	if err != nil {
 		return fmt.Errorf("read segment: %w", err)
-	}
-
-	// Remove tombstones (deleted keys)
-	// This could be done more efficiently skipping the lines on the write
-	// but doing it separately to illustrate the tombstone handling
-	for key, value := range keyValues {
-		if value == tombstoneValue {
-			delete(keyValues, key)
-		}
 	}
 
 	// Write compacted records back

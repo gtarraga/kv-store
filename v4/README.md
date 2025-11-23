@@ -1,17 +1,12 @@
 # Segmented storage with compaction
 
-Append-only file-based KV store with segmented logs. Instead of a single large file, data is split across multiple segment files. Each segment is immutable once closed, and segments can be compacted to remove duplicates and tombstones. For the indexed version of this, take a look at `/v4_idx`.
+Append-only file-based KV store with segmented logs. Instead of a single large file, data is split across multiple segment files. Each segment is immutable once closed, and segments can be compacted to remove duplicates. For the indexed version of this, take a look at `/v4_idx`.
 
 ## Architecture
 
 **Segments**: Data is split across multiple numbered segment files (e.g., `segment_0001.db`, `segment_0002.db`). When the active segment reaches a size threshold, it's closed and a new active segment is created for writes.
 
-**Compaction**: Background process that rewrites individual segments to remove:
-
-- Duplicate keys (keeping only the latest value)
-- Tombstone records for deleted keys
-
-This keeps segment sizes bounded and improves read performance.
+**Compaction**: Background process that rewrites individual segments to remove duplicate keys (keeping only the latest value). This keeps segment sizes bounded and improves read performance.
 
 ## Methods
 
