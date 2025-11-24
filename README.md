@@ -22,6 +22,8 @@ Each version (`v1`, `v2`, etc.) is a completely independent implementation with 
 
 - `v5` - **[Tiering and merges](https://github.com/gtarraga/kv-store/tree/main/v5)**: Each segment has its own index and idx compantion file. Added a manifest file to keep track of the state of segments and tiers. Merges and tiers now compact data and help enhance search speeds since less files.
 
+- `v5` - **[LSM-Tree implementation](https://github.com/gtarraga/kv-store/tree/main/v5)**: Full LSM Tree architecture. Segments are now SSTables with their own bloom filter, sparse index and metadata information. SSTables are distributed in tiers and get merged and compacted to move to a lower tier.
+
 Each version lives in its own folder with its own README explaining the approach.
 
 ## Usage
